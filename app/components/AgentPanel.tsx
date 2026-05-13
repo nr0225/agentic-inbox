@@ -62,6 +62,10 @@ const TOOL_LABELS: Record<string, { label: string; icon: React.ReactNode }> = {
 		label: "Moving email",
 		icon: <EnvelopeSimpleIcon size={14} weight="bold" />,
 	},
+	browse_url: {
+		label: "Browsing URL",
+		icon: <MagnifyingGlassIcon size={14} weight="bold" />,
+	},
 };
 
 function ToolCallBadge({
