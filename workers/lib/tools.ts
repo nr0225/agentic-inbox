@@ -45,7 +45,7 @@ type MailboxSearchStub = {
 const PRIVATE_IP_RE =
 	/^(10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.|127\.|169\.254\.|0\.)/;
 
-function isSafeUrl(raw: string): { ok: true; url: URL } | { ok: false; reason: string } {
+export function isSafeUrl(raw: string): { ok: true; url: URL } | { ok: false; reason: string } {
 	let url: URL;
 	try {
 		url = new URL(raw);
