@@ -14,6 +14,7 @@
  * are reused directly — this module covers the remaining shared operations.
  */
 
+import puppeteer from "@cloudflare/puppeteer";
 import type { EmailFull } from "./schemas";
 import {
 	getMailboxStub,
@@ -26,7 +27,7 @@ import {
 	buildReferencesChain,
 	buildThreadingHeaders,
 } from "./email-helpers";
-import { verifyDraft } from "./ai";
+import { verifyDraft, isPromptInjection } from "./ai";
 import { sendEmail } from "../email-sender";
 import { Folders } from "../../shared/folders";
 import type { Env } from "../types";
@@ -38,6 +39,33 @@ type MailboxSearchStub = {
 		folder?: string;
 	}) => Promise<unknown>;
 };
+
+// ── browse_url helpers ─────────────────────────────────────────────
+
+const PRIVATE_IP_RE =
+	/^(10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.|127\.|169\.254\.|0\.)/;
+
+function isSafeUrl(raw: string): { ok: true; url: URL } | { ok: false; reason: string } {
+	let url: URL;
+	try {
+		url = new URL(raw);
+	} catch {
+		return { ok: false, reason: "Invalid URL" };
+	}
+	if (url.protocol !== "http:" && url.protocol !== "https:") {
+		return { ok: false, reason: "Only http and https URLs are supported" };
+	}
+	const host = url.hostname.toLowerCase();
+	if (host === "localhost" || host === "[::1]") {
+		return { ok: false, reason: "Private/internal addresses are not allowed" };
+	}
+	if (PRIVATE_IP_RE.test(host)) {
+		return { ok: false, reason: "Private/internal addresses are not allowed" };
+	}
+	return { ok: true, url };
+}
+
+const BROWSE_TEXT_LIMIT = 5_000;
 
 type RateLimitStub = {
 	checkSendRateLimit: () => Promise<string | null>;
@@ -528,4 +556,84 @@ export async function toolSendEmail(
 	);
 
 	return { status: "sent", messageId, message: `Email sent to ${params.to}` };
+}
+
+// ── browse_url ─────────────────────────────────────────────────────
+
+export type BrowseUrlResult =
+	| {
+			url: string;
+			title: string;
+			description: string;
+			content: string;
+			injectionWarning?: true;
+	  }
+	| { error: string };
+
+/**
+ * Fetch a URL using a sandboxed headless browser and return its text content.
+ *
+ * Security layers:
+ *   1. URL validation — only http/https, no private/internal IPs (SSRF)
+ *   2. Page timeout — 15 s hard cap via Puppeteer abort signal
+ *   3. Content size cap — text truncated at BROWSE_TEXT_LIMIT chars
+ *   4. Prompt injection scan — if the page content looks adversarial the
+ *      body is withheld and the agent receives a warning instead
+ *   5. XML tagging — content is wrapped in <external-web-content> so the
+ *      model treats it as untrusted external data (standard RAG defence)
+ */
+export async function toolBrowseUrl(
+	env: Env,
+	rawUrl: string,
+): Promise<BrowseUrlResult> {
+	const check = isSafeUrl(rawUrl);
+	if (!check.ok) return { error: check.reason };
+	const { url } = check;
+
+	let browser: Awaited<ReturnType<typeof puppeteer.launch>> | null = null;
+	try {
+		browser = await puppeteer.launch((env as any).BROWSER);
+		const page = await browser.newPage();
+		await page.setUserAgent(
+			"Mozilla/5.0 (compatible; AgenticInboxBot/1.0; +https://github.com/nr0225/agentic-inbox)",
+		);
+
+		await page.goto(url.href, {
+			waitUntil: "domcontentloaded",
+			timeout: 15_000,
+		});
+
+		const { title, description, bodyText } = await page.evaluate(() => {
+			// Remove noise elements before extracting text
+			for (const sel of ["script", "style", "nav", "header", "footer", "aside", "noscript"]) {
+				document.querySelectorAll(sel).forEach((el) => el.remove());
+			}
+			const metaDesc =
+				(document.querySelector('meta[name="description"]') as HTMLMetaElement | null)
+					?.content ?? "";
+			return {
+				title: document.title,
+				description: metaDesc,
+				bodyText: (document.body?.innerText ?? "").replace(/\s{3,}/g, "\n\n").trim(),
+			};
+		});
+
+		const truncated = bodyText.slice(0, BROWSE_TEXT_LIMIT);
+		const wasInjection = await isPromptInjection(env.AI, truncated);
+
+		return {
+			url: url.href,
+			title,
+			description,
+			// Wrap in XML tags so the model treats this as external/untrusted input
+			content: wasInjection
+				? "(Content withheld: page appears to contain adversarial instructions)"
+				: `<external-web-content source="${url.href}">\n${truncated}\n</external-web-content>`,
+			...(wasInjection ? { injectionWarning: true as const } : {}),
+		};
+	} catch (e) {
+		return { error: `Failed to browse URL: ${(e as Error).message}` };
+	} finally {
+		await browser?.close();
+	}
 }

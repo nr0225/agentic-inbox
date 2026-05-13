@@ -19,6 +19,7 @@ import {
 	toolSendEmail,
 	toolMarkEmailRead,
 	toolMoveEmail,
+	toolBrowseUrl,
 } from "../lib/tools";
 import { Folders, FOLDER_TOOL_DESCRIPTION, MOVE_FOLDER_TOOL_DESCRIPTION } from "../../shared/folders";
 import type { Env } from "../types";
@@ -427,6 +428,19 @@ export class EmailMCP extends McpAgent<Env> {
 					};
 				}
 				return mcpText(result);
+			},
+		);
+
+		// ── browse_url ─────────────────────────────────────────────
+		this.server.tool(
+			"browse_url",
+			"Fetch the text content of a public URL using a sandboxed headless browser. Use this to preview links, check what a URL contains, or gather context. Only http/https URLs are supported. Private/internal addresses are blocked.",
+			{
+				url: z.string().describe("The URL to browse (must be http or https)"),
+			},
+			async ({ url }) => {
+				const result = await toolBrowseUrl(env, url);
+				return mcpResult(result as Record<string, unknown>);
 			},
 		);
 	}

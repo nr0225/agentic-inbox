@@ -28,6 +28,7 @@ import {
 	toolMarkEmailRead,
 	toolMoveEmail,
 	toolDiscardDraft,
+	toolBrowseUrl,
 } from "../lib/tools";
 import { Folders, FOLDER_TOOL_DESCRIPTION, MOVE_FOLDER_TOOL_DESCRIPTION } from "../../shared/folders";
 import type { Env } from "../types";
@@ -264,6 +265,17 @@ function createEmailTools(env: Env, mailboxId: string) {
 			}),
 			execute: async ({ draftId }): Promise<unknown> => {
 				return toolDiscardDraft(env, mailboxId, draftId);
+			},
+		}),
+
+		browse_url: defineTool({
+			description:
+				"Fetch the text content of a public URL using a sandboxed headless browser. Use this to preview links from emails, check what a URL contains, or gather context before drafting a reply. Only http/https URLs are supported. Private/internal addresses are blocked.",
+			parameters: z.object({
+				url: z.string().describe("The URL to browse (must be http or https)"),
+			}),
+			execute: async ({ url }): Promise<unknown> => {
+				return toolBrowseUrl(env, url);
 			},
 		}),
 	};
