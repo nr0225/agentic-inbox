@@ -32,6 +32,7 @@ import {
 } from "../lib/tools";
 import { Folders, FOLDER_TOOL_DESCRIPTION, MOVE_FOLDER_TOOL_DESCRIPTION } from "../../shared/folders";
 import type { Env } from "../types";
+import { classifyEmail, formatClassification } from "../lib/email-analyzer";
 
 // AI SDK v6 changed tool() overloads significantly. We define tools as plain
 // objects matching the Tool type to avoid overload resolution issues.
@@ -278,6 +279,39 @@ function createEmailTools(env: Env, mailboxId: string) {
 				return toolBrowseUrl(env, url);
 			},
 		}),
+
+		analyze_email: defineTool({
+			description:
+				"Analyze an email to understand its type, urgency, tone, and what a reply should focus on. Use this before drafting a response to a complex, ambiguous, or sensitive email.",
+			parameters: z.object({
+				emailId: z.string().describe("The email ID to analyze"),
+				includeThread: z
+					.boolean()
+					.default(false)
+					.describe("Include thread history in the analysis for better context"),
+			}),
+			execute: async ({ emailId, includeThread }): Promise<unknown> => {
+				const emailResult = await toolGetEmail(env, mailboxId, emailId);
+				if ("error" in (emailResult as object)) return emailResult;
+
+				const email = emailResult as EmailFull;
+				const emailText = stripHtmlToText(email.body ?? "");
+
+				let threadContext: string | undefined;
+				if (includeThread && email.thread_id) {
+					const thread = await toolGetThread(env, mailboxId, email.thread_id);
+					if (Array.isArray(thread) && thread.length > 1) {
+						threadContext = thread
+							.map((e: EmailFull) => `[${e.date}] ${e.sender}: ${stripHtmlToText(e.body ?? "").slice(0, 300)}`)
+							.join("\n\n");
+					}
+				}
+
+				const classification = await classifyEmail(env.AI, emailText, threadContext);
+				if (!classification) return { error: "Could not classify email" };
+				return classification;
+			},
+		}),
 	};
 }
 
@@ -435,7 +469,27 @@ export class EmailAgent extends AIChatAgent<any> {
 			console.warn("Pre-read failed, agent will use tools:", (e as Error).message);
 		}
 
-		let autoPrompt = `A new email just arrived. Draft an appropriate response using draft_reply.
+		// Planning phase: classify the email before drafting so the model gets
+		// a structured brief instead of raw content. Failures are non-blocking.
+		let classificationBrief = "";
+		if (emailBody) {
+			console.log(`[agent-task] ANALYZING email ${emailData.emailId}`);
+			try {
+				const classification = await classifyEmail(
+					env.AI,
+					emailBody,
+					threadContext || undefined,
+				);
+				if (classification) {
+					classificationBrief = formatClassification(classification) + "\n\n";
+					console.log(`[agent-task] DRAFTING (${classification.emailType}, ${classification.urgency}) for ${emailData.emailId}`);
+				}
+			} catch {
+				// Classification is advisory — never block the draft
+			}
+		}
+
+		let autoPrompt = `${classificationBrief}A new email just arrived. Draft an appropriate response using draft_reply.
 
 Email details:
 - Mailbox: ${emailData.mailboxId}
@@ -524,10 +578,14 @@ Based on the email content and thread context above, draft a reply using draft_r
 
 			// Persist the conversation into the agent's chat history
 			// If it called the tool, we just log a simple success message so the chat isn't cluttered
-			// with conversational slop.
-			const assistantText = draftToolCalled 
-				? `Created draft reply to ${emailData.sender}.`
+			// with conversational slop. Append classification summary when available.
+			const classificationTag = classificationBrief
+				? ` [${classificationBrief.match(/Type: (\S+)/)?.[1] ?? ""}, ${classificationBrief.match(/Urgency: (\S+)/)?.[1] ?? ""} urgency]`
+				: "";
+			const assistantText = draftToolCalled
+				? `Created draft reply to ${emailData.sender}.${classificationTag}`
 				: result.text;
+			console.log(`[agent-task] DONE email ${emailData.emailId}`);
 
 			const newMessages = [
 				{
